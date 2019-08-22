@@ -1,0 +1,66 @@
+#!/bin/bash
+
+# Scans for available wifi networks, lists them with signal strength and Authentication.
+# Displays existing Wifi networks in wpa.conf and their passwords and comments
+# Joins it all together in a numbered list, so that they can be selected in dmenu
+IFS=$'\n'
+wifilist=( "$((wpa_cli -i wlp4s0 scan > /dev/null; sleep 2; wpa_cli -i wlp4s0 scan_results | awk '{print $5,$3,$4}' | sed -E 's/\s/\"\"/g;1d' ; cat wpa.conf | grep -E 'ssid|#psk|#Comments' | tr -d '\n' | sed -E -e 's/\tssid\="/\n/g;s/"\t\#psk\="/\"\"/g;s/"\t\#Comments \= "/\"\"/g;' | sed -E '1d' ) | awk '{print NR,$0}' | column -t -s '""' )" )
+
+	echo ${wifilist[1]}
+
+# The above is an attempt to make wifilist a variable, which can then be selected from. Won't need it with dmenu. To return to normal, remove IFS line completely, the above echo, the echo after read SSID, and "wifilist=( "$( ... )")
+
+# Selecting wifi -> will change once dmenu is integrated. SSID will be picked via awk '{print $2}'"
+
+echo "Which WiFi do you want to connect to? (SSID passphrase private)"
+read -p 'SSID: ' SSID
+
+echo "${wifilist[$SSID]}"
+
+# Makes sure password is longer than 8 characters. If it's not a WPA network, it shouldn't require this!!!
+
+until [ "${#Pass}" -gt "8" ]
+	do
+		read -p 'Passphrase: ' Pass
+	done
+
+# If network is Private (y) it gets added to the private.conf list, if not, it defaults to public.conf
+
+read -p 'Private (y/N): ' Private
+
+# A place to add Comments to the network (eg. Location, Place Name, etc.) so that if network names are repeated, you can figure out which is which and not overwrite.
+
+read -p 'Comments: ' Comments
+
+# Check to see inputs (will remove)
+
+echo $SSID
+echo $Pass
+echo $Private
+echo $Comments
+
+# Check to see if authentication is PSK, then do all this. If not, add keymngt=None or something like that.
+# Ignore WEP
+
+# Timestamp to add to comments
+
+timestamp() {
+	date +"%Y-%m-%d_%H-%M-%S"
+}
+
+# See if current files contain same info, delete (to update) - make this ask a question, printing the date of addition and a comment? Then if.
+
+if [ "$Private" = "y" ]; then
+
+#  Removes blank lines, substitutes line breaks for '; ', formats, sorts and gets rid of duplicates, if SSID is a match it deletes the old one, reformats it to original state, rewrites file.
+	
+	sed -E -e '/^\s*$/d' private.conf | sed -E -e ':a;N;$!ba;s/\n/\; /g' -e 's/\;\s*network/\nnetwork/g' | sed 's/\(.*\)\}.*/\1\}/' | sort -u | sed "/ssid\=\"$SSID\"/d" | sed 's/\; /\n/g' > private.conf
+	wpa_passphrase $SSID $Pass >> private.conf
+	sed -i -E -e "$ s/\}/\t\#Comments \= \"$Comments "$(timestamp)"\"\n\}/" private.conf # Adds comments and timestamp to new entry
+else
+	sed -E -e '/^\s*$/d' public.conf | sed -E -e ':a;N;$!ba;s/\n/\; /g' -e 's/\;\s*network/\nnetwork/g' | sed 's/\(.*\)\}.*/\1\}/' | sort -u | sed "/ssid\=\"$SSID\"/d" | sed '/!^network/d' | sed 's/\; /\n/g' > public.conf
+	wpa_passphrase $SSID "$Pass" >> public.conf
+	sed -i -E -e "$ s/\}/\t\#Comments \= \"$Comments "$(timestamp)"\"\n\}/" public.conf # Adds comments and timestamp to new entry
+fi
+
+	echo -e "###\n$(<private.conf)\n###\n$(<public.conf)" > wpa.conf # Concatenates it all into one file
