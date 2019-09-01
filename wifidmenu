@@ -1,0 +1,188 @@
+#!/bin/bash
+
+# Scans for available wifi networks, lists them with signal strength and Authentication.
+# Displays existing Wifi networks in wpa.conf and their passwords and comments
+# Joins it all together in a numbered list, so that they can be selected in dmenu
+
+# Path Variables
+
+IFS=$'\n'
+config=$'/home/danniel/.config/wifisetup/'
+interface=$'wlp4s0'
+supplicant="$( printf "/etc/wpa_supplicant/wpa_supplicant-${interface}.conf" )" # check variable
+
+echo $supplicant
+
+# Displays list of available wifi networks followed by wpa_supplicant existing networks in dmenu.
+# To Do:
+# Find a better way of organising the existing data (with the authentication protocol), so that things appear in the same column:
+# ssid | signal strenth (replace with "-" for existing | authentication | comments (blank for new)
+# sort wpa_cli results by strength.
+
+wifi="$({ wpa_cli -i "${interface}" scan > /dev/null; sleep 5; wpa_cli -i "${interface}" scan_results | awk '{print $5,$3,$4}' | sed -E 's/\s/""/g;1d' ; cat ${config}public.conf | grep -E 'ssid|#psk|#Comments|#key_mgmt' | tr -d '\n' | sed -E -e 's/\tssid\="/\n/g;s/"\t\#psk\="/""/g;s/"\t\#Comments\= "/""/g'| sed -E '1d' ; } | awk '{print NR,$0}' | column -t -s '""' | dmenu -i -l 5)"
+
+# TEST
+echo "$wifi"
+
+# Save SSID variable
+# Is there a better way to awk the different parts of the script? Maybe storing it as an array and calling it with $[wifi(1)]
+
+SSID="$(echo "${wifi}" | awk '{print $2}')"
+key_mgmt="$(echo "${wifi}" | awk '{print $4}')" # Might need to change the awk value
+
+# If network exists in wpa_supplicant, ask what to do with it. If not, automatically call it new.
+
+echo "${SSID}"
+if find "${config}" -type f -print0 | xargs -0 grep -HE "ssid\=\""${SSID}"\""
+then
+	mode="$( printf "replace\ncreate\ndelete\nexit" | dmenu -i -p "This network exists already" )"
+	else
+		mode=$'create'
+fi
+
+# If mode is non-zero, continue. If mode is exit, exit. If mode is delete, choose file from which to delete. If mode is replace, choose file from which to replace. If mode is new, ask what file you want it to be created in, and continue.
+
+if [ "${#mode}" -lt "1" ]
+then
+	echo "" >> /dev/null
+elif [ "${mode}" == "exit" ]
+then
+	exit 0
+elif [ "${mode}" == "create" ]
+then
+# If it's new, choose which file you want it in.
+	filename="$( ls -a | grep ".conf" | sed -e "s/\.conf//g" | dmenu -i -l 10 -p "Where do you want to ${mode} it?" )"
+	filepath="$(printf "${config}${filename}.conf" )"
+
+elif [ "${#mode}" -gt "5" ]
+then
+# If replace/delete, find the file it exists in, and remove that entry. 
+
+	filename="$( find "${config}" -type f -print0 | xargs -0 grep -HlE "ssid\=\""${SSID}"\"" | sed -e "s,"${config}",,g" -e "s/\.conf//g" | dmenu -i -l 10 -p "Where is the instance you want to ${mode}?" )"
+	filepath="$(printf "${config}${filename}.conf" )"
+	sed -E -e '/^\s*$/d' "${filepath}" | sed -E -e ':a;N;$!ba;s/\n/\; /g' -e 's/\;\s*network/\nnetwork/g' | sed 's/\(.*\)\}.*/\1\}/' | sort -u | sed "/ssid\=\""${SSID}"\"/d" | sed 's/\; /\n/g' > "${filepath}" 
+
+	if [ "${mode}" == "delete" ]
+	then
+		echo "delete_success"
+		exit 0
+		fi
+fi
+
+# Makes sure password is longer than 8 characters. If it's not a WPA network, there's no minimum length. Add key_mgmt portions.
+
+# To Do: See what password-less wifi presents
+
+if [[ "${wifi}" =~ "WPA" ]] 
+then
+	until [ "${#Pass}" -gt "8" ]
+		do
+	key="WPA-PSK"
+	pairwise="CCMP TKIP"
+			Pass="$( echo "" | dmenu -p "WPA Passphrase: ")"
+			psk="$( wpa_passphrase "${SSID}" "${Pass}" | grep "psk" | awk '{print $1}' | sed '1d' )" 
+		done
+elif [[ "${wifi}" =~ "WEP" ]] 
+then
+	key="IEEE8021X"
+			Pass="$( echo "" | dmenu -p "WEP Passphrase: ")"
+			psk="$( printf "	psk="${Pass}"" )"
+else 
+	key="NONE"
+fi
+
+# A place to add Comments to the network (eg. Location, Place Name, etc.) so that if network names are repeated, you can figure out which is which and not overwrite.
+
+Comments="$( echo "" | dmenu -p "Comments: ")"
+
+# Timestamp to add to comments
+
+timestamp() {
+	date +"%Y-%m-%d_%H-%M-%S"
+}
+
+# New network format
+# To Do: Create different formats for WPA/WEP/None
+if [[ "${key}" eq "WPA-PSK" ]]
+then
+newnetwork="$( printf "network={
+	ssid=\""$SSID"\"
+	#key_mgmt="${key_mgmt}"
+	key_mgmt="${key}"
+	pairwise="${pairwise}"
+	#psk="${Pass}"
+	"${psk}"
+	#comments=\""${Comments}"\"
+	#lastmodified=\""$(timestamp)"\"
+}
+" )"
+elif [[ "${key}" eq "IEEE8021X" ]]
+then
+newnetwork="$( printf "network={
+	ssid=\""$SSID"\"
+	#key_mgmt="${key_mgmt}"
+	key_mgmt="${key}"
+	"${psk}"
+	#comments=\""${Comments}"\"
+	#lastmodified=\""$(timestamp)"\"
+}
+" )"
+elif [[ "${key}" eq "NONE" ]]
+newnetwork="$( printf "network={
+	ssid=\""$SSID"\"
+	#key_mgmt="${key_mgmt}"
+	key_mgmt="${key}"
+	#comments=\""${Comments}"\"
+	#lastmodified=\""$(timestamp)"\"
+}
+" )"
+
+# Add an option that lets you fill it in yourself, populated with the above variables already, and with the other options available but commented out.
+
+echo "${newnetwork}" >> "${filepath}"
+
+# Last action is to combine all these files, with a header file first, and then overwrite the /etc file
+
+# Check to see inputs (will remove)
+
+echo $SSID
+echo $Pass
+echo $Comments
+echo "$key"
+echo "$pairwise"
+echo "$mode"
+echo "$filename"
+echo "$filepath"
+echo "$(timestamp)"
+exit 0
+# exit 0
+# Create a series of IF statements:
+# If SSID exists, ask if you want to delete, replace, make new or nothing
+# If WPA, ask for passphrase, then do wpa_passphrase with SSID, and add "WPA" to authentication note
+# If WEP, ask for passphrase then add WEP to authentication note
+# If no security, add with that condition.
+# Exit.
+# Somewhere in the above, also ask for Comment.
+# Also private/public (store output of whatever commands above as a multiline variable, and then the final IF statement asks where to store it.
+
+# Check, for the above, what is the format of each different protocol entry (WPA, WEP, none).
+# With the replace option, can the line be kept? Only change the passphrase? Would there be any reason I'd want to change the comment?
+
+# Separate script idea: If no known connection is found in the first 20 seconds, disconnect wifi until this script is run.
+# Another idea: Make this be the way to choose which network you're connected to as well.
+
+
+if [ "${Private}" = "Yes" ]; then
+
+#  Removes blank lines, substitutes line breaks for '; ', formats, sorts and gets rid of duplicates, if SSID is a match it deletes the old one, reformats it to original state, rewrites file.
+	
+	sed -E -e '/^\s*$/d' private.conf | sed -E -e ':a;N;$!ba;s/\n/\; /g' -e 's/\;\s*network/\nnetwork/g' | sed 's/\(.*\)\}.*/\1\}/' | sort -u | sed "/ssid\=\""${SSID}"\"/d" | sed 's/\; /\n/g' > private.conf
+	wpa_passphrase "${SSID}" "${Pass}" >> private.conf
+	sed -i -E -e "$ s/\}/\t\#Comments\= \""${Comments}" "$(timestamp)"\"\n\}/" private.conf # Adds comments and timestamp to new entry
+else
+	sed -E -e '/^\s*$/d' public.conf | sed -E -e ':a;N;$!ba;s/\n/\; /g' -e 's/\;\s*network/\nnetwork/g' | sed 's/\(.*\)\}.*/\1\}/' | sort -u | sed "/ssid\=\""${SSID}"\"/d" | sed '/!^network/d' | sed 's/\; /\n/g' > public.conf
+	wpa_passphrase "${SSID}" "${Pass}" >> public.conf
+	sed -i -E -e "$ s/\}/\t\#Comments\= \""${Comments}" "$(timestamp)"\"\n\}/" public.conf # Adds comments and timestamp to new entry
+fi
+
+	echo -e "###\n$(<private.conf)\n###\n$(<public.conf)" > wpa.conf # Concatenates it all into one file
